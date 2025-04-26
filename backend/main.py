@@ -6,10 +6,15 @@ import tempfile
 from PIL import Image
 import os
 from functools import lru_cache
+import logging
 
 from services.storage import StorageService
 from services.processor import ImageProcessor
 from services.recommender import OutfitRecommender
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="StyleDNA AI",
@@ -28,18 +33,34 @@ app.add_middleware(
 
 @lru_cache()
 def get_storage_service():
-    return StorageService()
+    """Dependency for Firebase storage service"""
+    try:
+        return StorageService()
+    except Exception as e:
+        logger.error(f"Failed to initialize storage service: {e}")
+        raise HTTPException(status_code=500, detail="Storage service initialization failed")
 
 @lru_cache()
 def get_image_processor():
-    return ImageProcessor()
+    """Dependency for image processing service"""
+    try:
+        return ImageProcessor()
+    except Exception as e:
+        logger.error(f"Failed to initialize image processor: {e}")
+        raise HTTPException(status_code=500, detail="Image processor initialization failed")
 
 @lru_cache()
 def get_outfit_recommender():
-    return OutfitRecommender()
+    """Dependency for outfit recommendation service"""
+    try:
+        return OutfitRecommender()
+    except Exception as e:
+        logger.error(f"Failed to initialize outfit recommender: {e}")
+        raise HTTPException(status_code=500, detail="Outfit recommender initialization failed")
 
 @app.get("/")
 async def root():
+    """Root endpoint for health check"""
     return {"message": "Welcome to StyleDNA AI API"}
 
 @app.post("/upload-image")
@@ -47,7 +68,31 @@ async def upload_image(
     file: UploadFile = File(...),
     storage_service: StorageService = Depends(get_storage_service)
 ):
+    """
+    Upload and process a clothing image
+    
+    Args:
+        file: The image file to upload
+        storage_service: Injected storage service
+        
+    Returns:
+        dict: Upload results including image URL and metadata
+    """
     try:
+        # Validate file type first
+        if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file type. Only PNG and JPEG are supported"
+            )
+        
+        # Validate content type
+        if not file.content_type.startswith('image/'):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid content type. Only image files are supported"
+            )
+            
         # Create temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file.filename.split('.')[-1]}") as temp_file:
             content = await file.read()
@@ -77,19 +122,45 @@ async def upload_image(
             # Clean up temp file
             try:
                 os.unlink(temp_path)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete temporary file {temp_path}: {e}")
     
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error processing image: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
 @app.get("/recommend")
 async def recommend_outfit(
-    weather: str,
-    event_type: str,
+    weather: str = None,
+    event_type: str = None,
     outfit_recommender: OutfitRecommender = Depends(get_outfit_recommender)
 ) -> List[Dict]:
+    """
+    Get outfit recommendations based on weather and event type
+    
+    Args:
+        weather: Current weather condition
+        event_type: Type of event/occasion
+        outfit_recommender: Injected recommendation service
+        
+    Returns:
+        List[Dict]: List of recommended outfits
+    """
     try:
+        # Validate input parameters
+        if not weather or not event_type:
+            missing_params = []
+            if not weather:
+                missing_params.append("weather")
+            if not event_type:
+                missing_params.append("event_type")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required parameters: {', '.join(missing_params)}"
+            )
+            
         # Mock wardrobe data for testing
         wardrobe = [
             {
@@ -115,7 +186,10 @@ async def recommend_outfit(
         
         return recommendations
     
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error getting recommendations: {e}")
         raise HTTPException(status_code=500, detail=f"Error getting recommendations: {str(e)}")
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import firebase_admin
 from firebase_admin import storage
 import logging
 import io
+import json
 
 # Import your application and models
 from main import app, get_storage_service
@@ -31,14 +32,20 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 
 @pytest.fixture(scope="session")
 def test_db():
+    """Create and clean up test database"""
     # Create all tables
     Base.metadata.create_all(bind=engine)
     yield
     # Drop all tables after tests
     Base.metadata.drop_all(bind=engine)
+    try:
+        os.remove("test.db")
+    except Exception as e:
+        logger.warning(f"Failed to remove test database: {e}")
 
 @pytest.fixture(scope="function")
 def db_session(test_db):
+    """Provide a database session with transaction rollback"""
     connection = engine.connect()
     transaction = connection.begin()
     session = TestingSessionLocal(bind=connection)
@@ -49,6 +56,7 @@ def db_session(test_db):
 
 @pytest.fixture
 def sample_image():
+    """Create a small sample image for testing"""
     # Create a small sample image to minimize storage usage
     img = Image.new('RGB', (256, 256), color='red')
     # Save to bytes buffer first
@@ -69,7 +77,7 @@ def sample_image():
 
 @pytest.fixture
 def mock_firebase():
-    # Mock Firebase initialization
+    """Mock Firebase storage for successful operations"""
     with patch('firebase_admin.credentials.Certificate') as mock_cred, \
          patch('firebase_admin.initialize_app') as mock_init, \
          patch('firebase_admin.storage.bucket') as mock_bucket:
@@ -79,14 +87,18 @@ def mock_firebase():
         mock_blob.public_url = "https://firebasestorage.googleapis.com/test-image.jpg"
         mock_bucket.return_value.blob.return_value = mock_blob
         
+        # Create storage service in test mode
+        storage_service = StorageService(test_mode=True)
+        
         # Override the storage service
-        app.dependency_overrides[get_storage_service] = lambda: StorageService()
+        app.dependency_overrides[get_storage_service] = lambda: storage_service
         
         yield {
             'cred': mock_cred,
             'init': mock_init,
             'bucket': mock_bucket,
-            'blob': mock_blob
+            'blob': mock_blob,
+            'storage_service': storage_service
         }
         
         # Clean up
@@ -94,7 +106,7 @@ def mock_firebase():
 
 @pytest.fixture
 def mock_firebase_error():
-    # Mock Firebase initialization with errors
+    """Mock Firebase storage for error scenarios"""
     with patch('firebase_admin.credentials.Certificate') as mock_cred, \
          patch('firebase_admin.initialize_app') as mock_init, \
          patch('firebase_admin.storage.bucket') as mock_bucket:
@@ -107,8 +119,8 @@ def mock_firebase_error():
         mock_blob.public_url = None
         mock_bucket.return_value.blob.return_value = mock_blob
         
-        # Create a storage service with mocked Firebase
-        storage_service = StorageService()
+        # Create storage service in test mode
+        storage_service = StorageService(test_mode=True)
         
         # Override the storage service
         app.dependency_overrides[get_storage_service] = lambda: storage_service
@@ -226,4 +238,34 @@ def test_error_handling(mock_firebase_error):
     
     # Test delete with invalid blob name
     result = mock_firebase_error['storage_service'].delete_file("invalid/blob/name")
-    assert result is False 
+    assert result is False
+
+def test_missing_parameters():
+    """Test handling of missing parameters in recommendations"""
+    # Test without weather parameter
+    response = client.get("/recommend?event_type=casual")
+    assert response.status_code == 400
+    assert "weather" in response.json()["detail"].lower()
+    
+    # Test without event_type parameter
+    response = client.get("/recommend?weather=sunny")
+    assert response.status_code == 400
+    assert "event_type" in response.json()["detail"].lower()
+
+def test_invalid_file_types(mock_firebase):
+    """Test handling of invalid file types"""
+    # Test with non-image file
+    response = client.post(
+        "/upload-image",
+        files={"file": ("test.txt", b"some text content", "text/plain")}
+    )
+    assert response.status_code == 400
+    assert "Invalid file type" in response.json()["detail"]
+    
+    # Test with invalid content type
+    response = client.post(
+        "/upload-image",
+        files={"file": ("test.jpg", b"invalid content", "text/plain")}
+    )
+    assert response.status_code == 400
+    assert "Invalid content type" in response.json()["detail"] 
